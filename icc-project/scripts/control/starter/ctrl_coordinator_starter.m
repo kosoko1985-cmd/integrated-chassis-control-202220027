@@ -37,15 +37,44 @@ function actuatorCmd = ctrl_coordinator(latCmd, lonCmd, verCmd, vx, VEH, CTRL, L
 %       - allocation matrix form 도 가능 (LQ allocation)
 
     %% TODO: 학생 구현
-    %  (1) lonCmd.Fx_total → 4-wheel 균등 brake (with 60:40 split)
-    %  (2) latCmd.yawMoment → 4-wheel 차동 brake
-    %  (3) latCmd.steerAngle → actuatorCmd.steerAngle (saturation)
-    %  (4) verCmd → actuatorCmd.dampingCoeff (pass-through 또는 추가 가공)
-    %  (5) 최종 saturation
+    
+    % 상태 초기화 (적분기)
+    if ~isfield(ctrlState, 'intError')
+        ctrlState.intError = 0;
+    end
+    
+    % (1) yaw rate 추종을 위한 AFS (PID)
+    yawError = yawRateRef - yawRate;
+    
+    % Anti-windup을 적용한 적분항 업데이트
+    ctrlState.intError = ctrlState.intError + yawError * dt;
+    ctrlState.intError = max(-CTRL.LAT.intMax, min(CTRL.LAT.intMax, ctrlState.intError));
+    
+    % (3) Speed scheduling: 저속에서는 조향을 키우고 고속에서는 줄임
+    v_ref = 15; % 기준 속도 [m/s]
+    vx_safe = max(vx, 1.0); % 0 나누기 방지
+    speed_factor = min(vx_safe / v_ref, 2); 
+    
+    % 기본 제어 입력 계산 (Speed scheduling 적용)
+    steer_req = (CTRL.LAT.Kp * yawError + CTRL.LAT.Ki * ctrlState.intError) / speed_factor;
+    
+    % (4) limit/saturation (조향각 제한)
+    deltaAdd.steerAngle = max(-LIM.MAX_STEER_ANGLE, min(LIM.MAX_STEER_ANGLE, steer_req));
 
-    % 임시 baseline (반드시 교체)
-    actuatorCmd.steerAngle    = latCmd.steerAngle;
-    actuatorCmd.brakeTorque   = zeros(4, 1);
-    actuatorCmd.dampingCoeff  = verCmd;
+    % (2) slip angle 임계 초과 시 yaw moment 계산 (ESC)
+    beta_th = deg2rad(3); % 임계값 (필요시 LIM.MAX_SLIP_ANGLE 로 교체)
+    if isfield(LIM, 'MAX_SLIP_ANGLE')
+        beta_th = LIM.MAX_SLIP_ANGLE;
+    end
+    
+    if abs(slipAngle) > beta_th
+        % driver intent와 반대 방향의 요 모멘트 생성
+        % M_z = -K_beta * sign(beta) * (|beta| - beta_th) * f(vx)
+        K_beta = CTRL.LAT.Kp; % 별도의 ESC 게인이 없다면 LAT.Kp 활용
+        deltaAdd.yawMoment = -K_beta * sign(slipAngle) * (abs(slipAngle) - beta_th) * speed_factor;
+    else
+        deltaAdd.yawMoment = 0;
+    end
+end
 
 end

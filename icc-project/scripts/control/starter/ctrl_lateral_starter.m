@@ -38,13 +38,40 @@ function [deltaAdd, ctrlState] = ctrl_lateral(yawRateRef, yawRate, slipAngle, vx
 %       - speed scheduling: f(vx) = min(vx/v_ref, 2)
 
     %% TODO: 여기에 학생 구현 작성
-    %  (1) PID/LQR/... 으로 yaw rate 추종 보조 조향 계산
-    %  (2) slip angle 임계 초과 시 yaw moment 계산
-    %  (3) speed scheduling 적용
-    %  (4) limit/saturation
-
-    % 임시 baseline (반드시 본인 설계로 교체할 것)
-    deltaAdd.steerAngle = 0;
-    deltaAdd.yawMoment  = 0;
-
+   % 상태 초기화
+    if ~isfield(ctrlState, 'intErrorVx')
+        ctrlState.intErrorVx = 0;
+        ctrlState.prevForce = 0;
+    end
+    
+    % (1) speed-tracking PI
+    vxError = vxRef - vx;
+    
+    % (4) anti-windup
+    ctrlState.intErrorVx = ctrlState.intErrorVx + vxError * dt;
+    ctrlState.intErrorVx = max(-CTRL.LON.intMax, min(CTRL.LON.intMax, ctrlState.intErrorVx));
+    
+    Fx_raw = CTRL.LON.Kp * vxError + CTRL.LON.Ki * ctrlState.intErrorVx;
+    
+    % (3) jerk limit (차량 질량을 곱해 힘의 변화율 한계 도출)
+    m = 1700; % 기본 질량 (sim_params.m의 VEH.mass 활용 권장)
+    max_dF = LIM.MAX_JERK * m * dt;
+    
+    Fx_req = max(ctrlState.prevForce - max_dF, min(ctrlState.prevForce + max_dF, Fx_raw));
+    ctrlState.prevForce = Fx_req;
+    
+    forceCmd.Fx_total = Fx_req;
+    
+    % (2) ABS modulation
+    % Runner가 매 스텝 ctrlState.wheelSlip 에 값을 넣어준다고 가정할 때의 Bang-bang 로직
+    forceCmd.brakeRatio = ones(4, 1);
+    kappa_target = 0.12;
+    
+    if ax < 0 && isfield(ctrlState, 'wheelSlip') % 감속 중일 때만 작동
+        for i = 1:4
+            if abs(ctrlState.wheelSlip(i)) > kappa_target
+                forceCmd.brakeRatio(i) = 0.5; % 슬립 초과 시 제동력 50%로 감소
+            end
+        end
+    end
 end

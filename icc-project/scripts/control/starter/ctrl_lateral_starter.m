@@ -38,39 +38,35 @@ function [deltaAdd, ctrlState] = ctrl_lateral(yawRateRef, yawRate, slipAngle, vx
 %       - speed scheduling: f(vx) = min(vx/v_ref, 2)
 
     %% TODO: 여기에 학생 구현 작성
-  % 상태 초기화 (적분기)
+ function [deltaAdd, ctrlState] = ctrl_lateral(yawRateRef, yawRate, slipAngle, vx, ctrlState, CTRL, LIM, dt)
+    % 1. 상태 초기화 (적분기)
     if ~isfield(ctrlState, 'intError')
         ctrlState.intError = 0;
     end
     
-    % (1) yaw rate 추종을 위한 AFS (PID)
+    % 2. yaw rate 추종 (AFS - PID 제어)
     yawError = yawRateRef - yawRate;
     
-    % Anti-windup을 적용한 적분항 업데이트
+    % Anti-windup
     ctrlState.intError = ctrlState.intError + yawError * dt;
     ctrlState.intError = max(-CTRL.LAT.intMax, min(CTRL.LAT.intMax, ctrlState.intError));
     
-    % (3) Speed scheduling: 저속에서는 조향을 키우고 고속에서는 줄임
-    v_ref = 15; % 기준 속도 [m/s]
-    vx_safe = max(vx, 1.0); % 0 나누기 방지
+    % Speed scheduling
+    v_ref = 15; 
+    vx_safe = max(vx, 1.0); 
     speed_factor = min(vx_safe / v_ref, 2); 
     
-    % 기본 제어 입력 계산 (Speed scheduling 적용)
     steer_req = (CTRL.LAT.Kp * yawError + CTRL.LAT.Ki * ctrlState.intError) / speed_factor;
-    
-    % (4) limit/saturation (조향각 제한)
     deltaAdd.steerAngle = max(-LIM.MAX_STEER_ANGLE, min(LIM.MAX_STEER_ANGLE, steer_req));
 
-    % (2) slip angle 임계 초과 시 yaw moment 계산 (ESC)
-    beta_th = deg2rad(3); % 임계값 (필요시 LIM.MAX_SLIP_ANGLE 로 교체)
+    % 3. slip angle 제한 (ESC)
+    beta_th = deg2rad(3); 
     if isfield(LIM, 'MAX_SLIP_ANGLE')
         beta_th = LIM.MAX_SLIP_ANGLE;
     end
     
     if abs(slipAngle) > beta_th
-        % driver intent와 반대 방향의 요 모멘트 생성
-        % M_z = -K_beta * sign(beta) * (|beta| - beta_th) * f(vx)
-        K_beta = CTRL.LAT.Kp; % 별도의 ESC 게인이 없다면 LAT.Kp 활용
+        K_beta = CTRL.LAT.Kp; 
         deltaAdd.yawMoment = -K_beta * sign(slipAngle) * (abs(slipAngle) - beta_th) * speed_factor;
     else
         deltaAdd.yawMoment = 0;

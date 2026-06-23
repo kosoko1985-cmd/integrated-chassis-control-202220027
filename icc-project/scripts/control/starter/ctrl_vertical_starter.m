@@ -29,11 +29,29 @@ function [dampingCmd, ctrlState] = ctrl_vertical(suspState, ctrlState, CTRL, dt)
 %         일 때만 c = cMax, 아니면 c = cMin (semi-active 의 on-off skyhook).
 
     %% TODO: 학생 구현
-    %  (1) skyhook (또는 변형)
-    %  (2) per-wheel 적용
-    %  (3) cMin/cMax 제한
-
-    % 임시 baseline (반드시 교체) — passive 1500 Ns/m
-    dampingCmd = 1500 * ones(4, 1);
+   %% TODO: 학생 구현
+    
+    dampingCmd = zeros(4, 1);
+    
+    for i = 1:4
+        zs_dot = suspState.zs_dot(i);
+        zu_dot = suspState.zu_dot(i);
+        v_rel = zs_dot - zu_dot;
+        
+        % (1) skyhook (On-Off Semi-active 방식 적용)
+        % Sprung mass의 절대 속도와 상대 속도의 부호가 같을 때 감쇠력 증가
+        if (zs_dot * v_rel) > 0
+            % (2) per-wheel 적용: 요구 감쇠력 계산
+            % 0 나누기 방지를 위해 분모에 작은 값(eps) 추가
+            c_req = CTRL.VER.skyGain * abs(zs_dot / (v_rel + 1e-6));
+        else
+            % 방향이 반대면 승차감을 위해 최소 감쇠력 적용
+            c_req = CTRL.VER.cMin;
+        end
+        
+        % (3) cMin/cMax 제한
+        dampingCmd(i) = max(CTRL.VER.cMin, min(CTRL.VER.cMax, c_req));
+    end
+end
 
 end

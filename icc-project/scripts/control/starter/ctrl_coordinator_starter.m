@@ -38,43 +38,58 @@ function actuatorCmd = ctrl_coordinator(latCmd, lonCmd, verCmd, vx, VEH, CTRL, L
 
     %% TODO: 학생 구현
     
-    % 상태 초기화 (적분기)
-    if ~isfield(ctrlState, 'intError')
-        ctrlState.intError = 0;
+   % 휠 반경 (힌트 참조)
+    r_w = 0.33; 
+    
+    % (1) lonCmd.Fx_total -> 4-wheel 균등 brake (with 60:40 split)
+    T_brake_base = zeros(4, 1); % [FL; FR; RL; RR]
+    if lonCmd.Fx_total < 0
+        F_brake_total = abs(lonCmd.Fx_total);
+        
+        % 전/후륜 60:40 분배 후 좌/우로 2등분 (T = F * r_w)
+        T_brake_base(1) = (F_brake_total * 0.6 / 2) * r_w; % FL
+        T_brake_base(2) = (F_brake_total * 0.6 / 2) * r_w; % FR
+        T_brake_base(3) = (F_brake_total * 0.4 / 2) * r_w; % RL
+        T_brake_base(4) = (F_brake_total * 0.4 / 2) * r_w; % RR
     end
     
-    % (1) yaw rate 추종을 위한 AFS (PID)
-    yawError = yawRateRef - yawRate;
+    % (2) latCmd.yawMoment -> 4-wheel 차동 brake
+    T_esc = zeros(4, 1);
+    Mz = latCmd.yawMoment;
     
-    % Anti-windup을 적용한 적분항 업데이트
-    ctrlState.intError = ctrlState.intError + yawError * dt;
-    ctrlState.intError = max(-CTRL.LAT.intMax, min(CTRL.LAT.intMax, ctrlState.intError));
-    
-    % (3) Speed scheduling: 저속에서는 조향을 키우고 고속에서는 줄임
-    v_ref = 15; % 기준 속도 [m/s]
-    vx_safe = max(vx, 1.0); % 0 나누기 방지
-    speed_factor = min(vx_safe / v_ref, 2); 
-    
-    % 기본 제어 입력 계산 (Speed scheduling 적용)
-    steer_req = (CTRL.LAT.Kp * yawError + CTRL.LAT.Ki * ctrlState.intError) / speed_factor;
-    
-    % (4) limit/saturation (조향각 제한)
-    deltaAdd.steerAngle = max(-LIM.MAX_STEER_ANGLE, min(LIM.MAX_STEER_ANGLE, steer_req));
-
-    % (2) slip angle 임계 초과 시 yaw moment 계산 (ESC)
-    beta_th = deg2rad(3); % 임계값 (필요시 LIM.MAX_SLIP_ANGLE 로 교체)
-    if isfield(LIM, 'MAX_SLIP_ANGLE')
-        beta_th = LIM.MAX_SLIP_ANGLE;
+    if Mz ~= 0
+        ratio_f = 0.6; % 전륜 개입 비율
+        t_f_half = VEH.track_f / 2;
+        t_r_half = VEH.track_r / 2;
+        
+        % 요구되는 좌우 힘의 차이 계산 (dT = F * r_w)
+        dT_f_trq = (abs(Mz) * ratio_f / t_f_half) * r_w;
+        dT_r_trq = (abs(Mz) * (1 - ratio_f) / t_r_half) * r_w;
+        
+        if Mz > 0
+            % 양의 Mz (CCW 반시계 방향) -> 좌측 브레이크 증가
+            T_esc(1) = dT_f_trq; % FL
+            T_esc(3) = dT_r_trq; % RL
+        else
+            % 음의 Mz (CW 시계 방향) -> 우측 브레이크 증가
+            T_esc(2) = dT_f_trq; % FR
+            T_esc(4) = dT_r_trq; % RR
+        end
     end
     
-    if abs(slipAngle) > beta_th
-        % driver intent와 반대 방향의 요 모멘트 생성
-        % M_z = -K_beta * sign(beta) * (|beta| - beta_th) * f(vx)
-        K_beta = CTRL.LAT.Kp; % 별도의 ESC 게인이 없다면 LAT.Kp 활용
-        deltaAdd.yawMoment = -K_beta * sign(slipAngle) * (abs(slipAngle) - beta_th) * speed_factor;
-    else
-        deltaAdd.yawMoment = 0;
+    % 총 제동 토크 합산 및 ABS brakeRatio 적용
+    T_total = T_brake_base + T_esc;
+    if isfield(lonCmd, 'brakeRatio')
+        T_total = T_total .* lonCmd.brakeRatio;
     end
-end
+    
+    % (5) 최종 saturation (0 ~ MAX_BRAKE_TRQ 제한)
+    actuatorCmd.brakeTorque = max(0, min(LIM.MAX_BRAKE_TRQ, T_total));
+    
+    % (3) latCmd.steerAngle -> actuatorCmd.steerAngle (saturation)
+    actuatorCmd.steerAngle = max(-LIM.MAX_STEER_ANGLE, min(LIM.MAX_STEER_ANGLE, latCmd.steerAngle));
+    
+    % (4) verCmd -> actuatorCmd.dampingCoeff (pass-through)
+    actuatorCmd.dampingCoeff = verCmd;
 
 end
